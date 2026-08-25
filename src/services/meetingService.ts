@@ -1,4 +1,4 @@
-import { BookingStatus, MeetingStatus, ParticipantRole, RoomStatus } from "@prisma/client";
+import { BookingStatus, LobbyRequestStatus, MeetingStatus, ParticipantRole, RoomStatus } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import { generateRoomId } from "../utils/roomId";
 import {
@@ -20,6 +20,7 @@ export interface CreateMeetingInput {
   hostId: string;
   title?: string;
   allowGuest?: boolean;
+  requiresApproval?: boolean;
   durationMinutes?: number;
   /// Utilisateurs pré-autorisés à rejoindre même si allowGuest=false —
   /// utilisé par bookingService pour préinscrire l'élève sur une séance
@@ -55,6 +56,7 @@ export async function createMeeting(input: CreateMeetingInput): Promise<CreateMe
       title: input.title?.trim() || "Réunion Amphix Meet",
       hostId: input.hostId,
       allowGuest: input.allowGuest ?? true,
+      requiresApproval: input.requiresApproval ?? false,
       status: MeetingStatus.IN_PROGRESS,
       durationMinutes,
       startedAt,
@@ -172,58 +174,37 @@ export interface JoinMeetingInput {
   userId: string;
 }
 
-export interface JoinMeetingResult {
+interface FinalizedJoin {
   token: string;
   livekitUrl: string;
-  roomId: string; // = joinCode, gardé pour compatibilité avec le frontend existant
+  roomId: string;
   role: ParticipantRole;
   endsAt: Date | null;
 }
 
-/**
- * Point d'entrée central des permissions de la Phase 2 : vérifie que
- * l'utilisateur a le droit de rejoindre AVANT de générer un token LiveKit.
- * Autorisé si : hôte, déjà participant enregistré, ou allowGuest=true.
- */
-export async function joinMeeting(input: JoinMeetingInput): Promise<JoinMeetingResult> {
-  const [meeting, user] = await Promise.all([
-    prisma.meeting.findUnique({
-      where: { joinCode: input.joinCode },
-      include: { room: true, participants: true },
-    }),
-    prisma.user.findUnique({ where: { id: input.userId } }),
-  ]);
+export type JoinMeetingOutcome =
+  | { waiting: true; lobbyRequestId: string }
+  | ({ waiting: false } & FinalizedJoin);
 
-  if (!user) {
-    throw new ApiRequestError(401, "unauthorized", "Utilisateur introuvable.");
-  }
-
-  if (!meeting || !meeting.room) {
-    throw new ApiRequestError(404, "meeting_not_found", "Cette réunion n'existe pas.");
-  }
-
-  if (meeting.status === MeetingStatus.COMPLETED || meeting.status === MeetingStatus.CANCELLED) {
-    throw new ApiRequestError(410, "meeting_ended", "Cette réunion est terminée.");
-  }
-
-  const isHost = meeting.hostId === input.userId;
-  const existingParticipant = meeting.participants.find((p) => p.userId === input.userId);
-
-  if (!isHost && !existingParticipant && !meeting.allowGuest) {
-    throw new ApiRequestError(
-      403,
-      "not_invited",
-      "Tu n'es pas invité à cette réunion."
-    );
-  }
-
+/** Upsert du participant + activation de la Room + génération du token —
+ * logique partagée entre le join direct et l'approbation d'une demande
+ * de salle d'attente (getLobbyRequestStatus). */
+async function finalizeJoin(
+  meeting: {
+    id: string;
+    joinCode: string;
+    endsAt: Date | null;
+    room: { id: string; externalRoomName: string; status: RoomStatus };
+  },
+  userId: string,
+  displayName: string,
+  isHost: boolean
+): Promise<FinalizedJoin> {
   const role = isHost ? ParticipantRole.HOST : ParticipantRole.PARTICIPANT;
 
-  // Crée l'enregistrement de participation s'il n'existe pas encore
-  // (cas d'un invité ou d'un guest qui rejoint pour la première fois).
   await prisma.meetingParticipant.upsert({
-    where: { meetingId_userId: { meetingId: meeting.id, userId: input.userId } },
-    create: { meetingId: meeting.id, userId: input.userId, role, joinedAt: new Date() },
+    where: { meetingId_userId: { meetingId: meeting.id, userId } },
+    create: { meetingId: meeting.id, userId, role, joinedAt: new Date() },
     update: { joinedAt: new Date(), leftAt: null },
   });
 
@@ -236,18 +217,162 @@ export async function joinMeeting(input: JoinMeetingInput): Promise<JoinMeetingR
 
   const token = await createParticipantToken({
     roomName: meeting.room.externalRoomName,
-    userId: input.userId,
-    displayName: user.name,
+    userId,
+    displayName,
     isHost,
   });
 
-  return {
-    token,
-    livekitUrl: getLivekitUrl(),
-    roomId: meeting.joinCode,
-    role,
-    endsAt: meeting.endsAt,
-  };
+  return { token, livekitUrl: getLivekitUrl(), roomId: meeting.joinCode, role, endsAt: meeting.endsAt };
+}
+
+/**
+ * Point d'entrée central des permissions : hôte et participants déjà
+ * enregistrés rejoignent directement. Sinon, si requiresApproval est
+ * activé, on crée une demande en salle d'attente au lieu de générer un
+ * token — c'est getLobbyRequestStatus (poll côté client) qui finalisera
+ * le join une fois l'hôte ayant répondu.
+ */
+export async function joinMeeting(input: JoinMeetingInput): Promise<JoinMeetingOutcome> {
+  const [meeting, user] = await Promise.all([
+    prisma.meeting.findUnique({
+      where: { joinCode: input.joinCode },
+      include: { room: true, participants: true },
+    }),
+    prisma.user.findUnique({ where: { id: input.userId } }),
+  ]);
+
+  if (!user) {
+    throw new ApiRequestError(401, "unauthorized", "Utilisateur introuvable.");
+  }
+  if (!meeting || !meeting.room) {
+    throw new ApiRequestError(404, "meeting_not_found", "Cette réunion n'existe pas.");
+  }
+  if (meeting.status === MeetingStatus.COMPLETED || meeting.status === MeetingStatus.CANCELLED) {
+    throw new ApiRequestError(410, "meeting_ended", "Cette réunion est terminée.");
+  }
+
+  const isHost = meeting.hostId === input.userId;
+  const existingParticipant = meeting.participants.find((p) => p.userId === input.userId);
+
+  if (isHost || existingParticipant) {
+    const result = await finalizeJoin(meeting, input.userId, user.name, isHost);
+    return { waiting: false, ...result };
+  }
+
+  if (meeting.requiresApproval) {
+    const lobbyRequest = await prisma.lobbyRequest.upsert({
+      where: { meetingId_userId: { meetingId: meeting.id, userId: input.userId } },
+      create: { meetingId: meeting.id, userId: input.userId },
+      update: {},
+    });
+    // Si une demande précédente avait été refusée, on la relance en attente.
+    if (lobbyRequest.status === LobbyRequestStatus.REJECTED) {
+      await prisma.lobbyRequest.update({
+        where: { id: lobbyRequest.id },
+        data: { status: LobbyRequestStatus.PENDING, respondedAt: null },
+      });
+    }
+    return { waiting: true, lobbyRequestId: lobbyRequest.id };
+  }
+
+  if (!meeting.allowGuest) {
+    throw new ApiRequestError(403, "not_invited", "Tu n'es pas invité à cette réunion.");
+  }
+
+  const result = await finalizeJoin(meeting, input.userId, user.name, false);
+  return { waiting: false, ...result };
+}
+
+/** Appelé en polling par le demandeur en salle d'attente. Génère le token
+ * LiveKit à la volée dès que le statut passe à APPROVED (pas avant — on
+ * ne crée pas de token pour une demande encore en attente). */
+export async function getLobbyRequestStatus(
+  lobbyRequestId: string,
+  requestingUserId: string
+): Promise<{ status: "PENDING" } | { status: "REJECTED" } | ({ status: "APPROVED" } & FinalizedJoin)> {
+  const lobbyRequest = await prisma.lobbyRequest.findUnique({
+    where: { id: lobbyRequestId },
+    include: { meeting: { include: { room: true } }, user: true },
+  });
+
+  if (!lobbyRequest || lobbyRequest.userId !== requestingUserId) {
+    throw new ApiRequestError(404, "lobby_request_not_found", "Demande introuvable.");
+  }
+  if (lobbyRequest.status === LobbyRequestStatus.PENDING) return { status: "PENDING" };
+  if (lobbyRequest.status === LobbyRequestStatus.REJECTED) return { status: "REJECTED" };
+
+  if (!lobbyRequest.meeting.room) {
+    throw new ApiRequestError(404, "meeting_not_found", "Cette réunion n'existe plus.");
+  }
+  const result = await finalizeJoin(
+    lobbyRequest.meeting,
+    lobbyRequest.userId,
+    lobbyRequest.user.name,
+    false
+  );
+  return { status: "APPROVED", ...result };
+}
+
+export interface LobbyRequestItem {
+  id: string;
+  userId: string;
+  name: string;
+  requestedAt: Date;
+}
+
+/** Hôte uniquement — liste les demandes en attente pour affichage dans le panneau participants. */
+export async function listLobbyRequests(
+  joinCode: string,
+  requestingUserId: string
+): Promise<LobbyRequestItem[]> {
+  const meeting = await prisma.meeting.findUnique({ where: { joinCode } });
+  if (!meeting) {
+    throw new ApiRequestError(404, "meeting_not_found", "Cette réunion n'existe pas.");
+  }
+  if (meeting.hostId !== requestingUserId) {
+    throw new ApiRequestError(403, "forbidden", "Seul l'hôte peut voir la salle d'attente.");
+  }
+
+  const requests = await prisma.lobbyRequest.findMany({
+    where: { meetingId: meeting.id, status: LobbyRequestStatus.PENDING },
+    include: { user: true },
+    orderBy: { createdAt: "asc" },
+  });
+
+  return requests.map((r) => ({
+    id: r.id,
+    userId: r.userId,
+    name: r.user.name,
+    requestedAt: r.createdAt,
+  }));
+}
+
+export async function respondToLobbyRequest(
+  lobbyRequestId: string,
+  requestingUserId: string,
+  approve: boolean
+): Promise<void> {
+  const lobbyRequest = await prisma.lobbyRequest.findUnique({
+    where: { id: lobbyRequestId },
+    include: { meeting: true },
+  });
+  if (!lobbyRequest) {
+    throw new ApiRequestError(404, "lobby_request_not_found", "Demande introuvable.");
+  }
+  if (lobbyRequest.meeting.hostId !== requestingUserId) {
+    throw new ApiRequestError(403, "forbidden", "Seul l'hôte peut répondre à cette demande.");
+  }
+  if (lobbyRequest.status !== LobbyRequestStatus.PENDING) {
+    throw new ApiRequestError(400, "already_answered", "Cette demande a déjà été traitée.");
+  }
+
+  await prisma.lobbyRequest.update({
+    where: { id: lobbyRequestId },
+    data: {
+      status: approve ? LobbyRequestStatus.APPROVED : LobbyRequestStatus.REJECTED,
+      respondedAt: new Date(),
+    },
+  });
 }
 
 /**
