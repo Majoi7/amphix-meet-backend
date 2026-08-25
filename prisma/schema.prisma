@@ -1,0 +1,238 @@
+// Phase 1 — auth. Phase 2 (ce fichier) — modèle Meeting/Room séparé.
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum UserRole {
+  STUDENT
+  TEACHER
+  ADMIN
+}
+
+enum VerificationTokenType {
+  EMAIL_VERIFICATION
+  PASSWORD_RESET
+}
+
+enum MeetingStatus {
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum RoomStatus {
+  PENDING
+  ACTIVE
+  ENDED
+}
+
+enum ParticipantRole {
+  HOST
+  PARTICIPANT
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+enum LobbyRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model User {
+  id              String    @id @default(cuid())
+  email           String    @unique
+  passwordHash    String
+  name            String
+  avatarUrl       String?
+  role            UserRole  @default(STUDENT)
+  emailVerifiedAt DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  refreshTokens       RefreshToken[]
+  verificationTokens  VerificationToken[]
+  hostedMeetings      Meeting[]
+  meetingParticipants MeetingParticipant[]
+  bookingsAsStudent   Booking[]            @relation("StudentBookings")
+  bookingsAsTeacher   Booking[]            @relation("TeacherBookings")
+  lobbyRequests       LobbyRequest[]
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+model VerificationToken {
+  id        String                @id @default(cuid())
+  userId    String
+  user      User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String                @unique
+  type      VerificationTokenType
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime              @default(now())
+
+  @@index([userId])
+  @@map("verification_tokens")
+}
+
+/// La réunion au sens métier — séparée de sa "Room" technique LiveKit
+/// (voir plus bas). joinCode est le code court partagé dans l'URL
+/// (ex: /room/ABC123) ; id est la clé primaire interne.
+model Meeting {
+  id               String        @id @default(cuid())
+  joinCode         String        @unique
+  title            String
+  hostId           String
+  host             User          @relation(fields: [hostId], references: [id], onDelete: Cascade)
+  status           MeetingStatus @default(IN_PROGRESS)
+  /// Si true, n'importe quel utilisateur authentifié peut rejoindre avec
+  /// le lien (comportement V1). Si false, seuls host + participants
+  /// explicitement invités peuvent rejoindre — à activer en Phase 5/6
+  /// pour les séances privées élève/prof.
+  allowGuest       Boolean       @default(true)
+  /// Si true, quiconque n'est pas déjà hôte/participant enregistré passe
+  /// par une salle d'attente (LobbyRequest) au lieu de rejoindre
+  /// directement, même si allowGuest est true.
+  requiresApproval Boolean       @default(false)
+  recordingEnabled Boolean       @default(false)
+  scheduledAt      DateTime?
+  durationMinutes  Int?
+  startedAt        DateTime?
+  /// Calculé à la création (startedAt + durationMinutes, plancher 3h) —
+  /// c'est sur ce champ que le scheduler (meetingScheduler.ts) se base
+  /// pour fermer automatiquement la salle à l'heure prévue.
+  endsAt           DateTime?
+  endedAt          DateTime?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  room         Room?
+  participants MeetingParticipant[]
+  booking      Booking?
+  lobbyRequests LobbyRequest[]
+  whiteboard   Whiteboard?
+
+  @@index([hostId])
+  @@map("meetings")
+}
+
+/// Le mapping technique vers le fournisseur WebRTC (LiveKit aujourd'hui,
+/// remplaçable plus tard sans toucher au modèle Meeting).
+model Room {
+  id               String     @id @default(cuid())
+  meetingId        String     @unique
+  meeting          Meeting    @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  provider         String     @default("livekit")
+  externalRoomName String     @unique
+  status           RoomStatus @default(PENDING)
+  createdAt        DateTime   @default(now())
+
+  @@map("rooms")
+}
+
+model MeetingParticipant {
+  id        String          @id @default(cuid())
+  meetingId String
+  meeting   Meeting         @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      ParticipantRole @default(PARTICIPANT)
+  joinedAt  DateTime?
+  leftAt    DateTime?
+  createdAt DateTime        @default(now())
+
+  @@unique([meetingId, userId])
+  @@index([meetingId])
+  @@index([userId])
+  @@map("meeting_participants")
+}
+
+/// Réservation d'une séance élève/prof — distincte de Meeting. Une
+/// Booking existe avant même qu'une salle soit créée (on planifie le
+/// cours), et se lie à une Meeting seulement au moment où quelqu'un
+/// démarre effectivement la séance (bookingService.startBookingSession).
+model Booking {
+  id          String        @id @default(cuid())
+  studentId   String
+  student     User          @relation("StudentBookings", fields: [studentId], references: [id], onDelete: Cascade)
+  teacherId   String
+  teacher     User          @relation("TeacherBookings", fields: [teacherId], references: [id], onDelete: Cascade)
+  /// Qui a créé la demande — l'AUTRE partie doit confirmer avant que ça
+  /// passe de PENDING à CONFIRMED.
+  createdById String
+  subject     String
+  startsAt    DateTime
+  endsAt      DateTime
+  durationMinutes Int
+  status      BookingStatus @default(PENDING)
+  meetingId   String?       @unique
+  meeting     Meeting?      @relation(fields: [meetingId], references: [id])
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@index([studentId])
+  @@index([teacherId])
+  @@map("bookings")
+}
+
+/// Une demande d'entrée dans la salle d'attente — créée quand quelqu'un
+/// qui n'est ni hôte ni déjà participant tente de rejoindre une réunion
+/// avec requiresApproval=true. L'hôte accepte ou refuse ; le demandeur
+/// poll son statut jusqu'à obtenir une réponse.
+model LobbyRequest {
+  id          String             @id @default(cuid())
+  meetingId   String
+  meeting     Meeting            @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status      LobbyRequestStatus @default(PENDING)
+  createdAt   DateTime           @default(now())
+  respondedAt DateTime?
+
+  @@unique([meetingId, userId])
+  @@index([meetingId])
+  @@map("lobby_requests")
+}
+
+/// Snapshot du tableau blanc d'une réunion — un seul par Meeting. La
+/// synchronisation temps réel entre participants passe par le canal de
+/// données LiveKit (voir Whiteboard.tsx côté frontend) ; cette table sert
+/// uniquement à PERSISTER l'état pour qu'un participant qui rejoint en
+/// retard ou recharge la page retrouve le tableau tel qu'il est.
+model Whiteboard {
+  id        String   @id @default(cuid())
+  meetingId String   @unique
+  meeting   Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  data      Json     @default("{\"strokes\":[]}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("whiteboards")
+}

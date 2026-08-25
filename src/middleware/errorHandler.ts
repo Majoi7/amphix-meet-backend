@@ -1,4 +1,5 @@
 import type { NextFunction, Request, Response } from "express";
+import { ZodError } from "zod";
 
 export class ApiRequestError extends Error {
   statusCode: number;
@@ -27,6 +28,15 @@ export function errorHandler(
 ): void {
   if (err instanceof ApiRequestError) {
     res.status(err.statusCode).json({ error: err.code, message: err.message });
+    return;
+  }
+
+  if (err instanceof ZodError) {
+    res.status(400).json({
+      error: "validation_error",
+      message: "Certains champs sont invalides.",
+      details: err.flatten().fieldErrors,
+    });
     return;
   }
 

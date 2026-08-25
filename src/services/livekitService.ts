@@ -1,4 +1,4 @@
-import { AccessToken, RoomServiceClient } from "livekit-server-sdk";
+import { AccessToken, RoomServiceClient, TrackType } from "livekit-server-sdk";
 
 const LIVEKIT_URL = process.env.LIVEKIT_URL ?? "";
 const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY ?? "";
@@ -13,8 +13,6 @@ const TOKEN_TTL_SECONDS = Math.max(
 );
 
 if (!LIVEKIT_URL || !LIVEKIT_API_KEY || !LIVEKIT_API_SECRET) {
-  // On ne fait pas planter le process au chargement du module (utile pour les tests),
-  // mais on log fort pour que l'erreur soit visible immédiatement au démarrage.
   // eslint-disable-next-line no-console
   console.warn(
     "[livekitService] Variables LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET manquantes. " +
@@ -22,60 +20,95 @@ if (!LIVEKIT_URL || !LIVEKIT_API_KEY || !LIVEKIT_API_SECRET) {
   );
 }
 
-// Le RoomServiceClient permet de gérer les salles côté serveur (lister, fermer, etc.)
-// Il utilise l'API Secret — ne doit JAMAIS être exposé au frontend.
 const roomService = new RoomServiceClient(
   LIVEKIT_URL.replace("wss://", "https://").replace("ws://", "http://"),
   LIVEKIT_API_KEY,
   LIVEKIT_API_SECRET
 );
 
+interface CreateTokenInput {
+  roomName: string; // externalRoomName (Room.externalRoomName)
+  userId: string; // identité stable — permet de retrouver/retirer un participant précis
+  displayName: string;
+  isHost: boolean;
+}
+
 /**
- * Génère un token d'accès LiveKit pour un participant donné dans une salle donnée.
- * Le token encode les permissions (publier/souscrire) et expire après TOKEN_TTL_SECONDS.
+ * Génère un token d'accès LiveKit pour un participant. L'identité utilisée
+ * est l'userId (stable, unique) au lieu d'un nom+suffixe aléatoire comme en
+ * V1 — indispensable maintenant qu'on veut pouvoir retrouver/retirer un
+ * participant précis (section 7 du cahier des charges, à implémenter).
+ *
+ * L'hôte reçoit `roomAdmin: true`, qui donne les droits de modération
+ * LiveKit (retirer un participant, etc.) — c'est la fondation des actions
+ * "mute participant" / "retirer participant" à venir.
  */
-export async function createParticipantToken(
-  roomId: string,
-  participantName: string
-): Promise<string> {
+export async function createParticipantToken(input: CreateTokenInput): Promise<string> {
   const at = new AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET, {
-    identity: `${participantName}-${cryptoRandomSuffix()}`,
-    name: participantName,
+    identity: input.userId,
+    name: input.displayName,
     ttl: TOKEN_TTL_SECONDS,
   });
 
   at.addGrant({
-    room: roomId,
+    room: input.roomName,
     roomJoin: true,
     canPublish: true,
     canSubscribe: true,
     canPublishData: true,
+    roomAdmin: input.isHost,
   });
 
   return at.toJwt();
 }
 
-/**
- * Vérifie si une salle existe déjà sur LiveKit (optionnel, utile pour valider
- * qu'un lien de réunion pointe vers une salle réellement active).
- */
-export async function roomExists(roomId: string): Promise<boolean> {
+export async function roomExists(externalRoomName: string): Promise<boolean> {
   try {
-    const rooms = await roomService.listRooms([roomId]);
-    return rooms.some((r) => r.name === roomId);
+    const rooms = await roomService.listRooms([externalRoomName]);
+    return rooms.some((r) => r.name === externalRoomName);
   } catch {
-    // Si LiveKit n'a pas encore créé la salle (elle se crée à la première connexion),
-    // on ne considère pas ça comme une erreur bloquante.
     return false;
   }
 }
 
-export function getLivekitUrl(): string {
-  return LIVEKIT_URL;
+/**
+ * Coupe le micro d'un participant à distance. Toute la modération passe
+ * par le backend (jamais directement client → client) — c'est le
+ * RoomServiceClient (API Secret) qui a le droit d'agir sur n'importe quel
+ * participant, pas le token du participant lui-même.
+ */
+export async function muteParticipantMicrophone(
+  externalRoomName: string,
+  participantIdentity: string
+): Promise<void> {
+  const participant = await roomService.getParticipant(externalRoomName, participantIdentity);
+  const audioTrack = participant.tracks.find((t) => t.type === TrackType.AUDIO);
+  if (!audioTrack) return; // pas de micro actif à couper
+  await roomService.mutePublishedTrack(
+    externalRoomName,
+    participantIdentity,
+    audioTrack.sid,
+    true
+  );
 }
 
-// Petit suffixe pour éviter les collisions d'identité si deux onglets rejoignent
-// avec le même nom affiché.
-function cryptoRandomSuffix(): string {
-  return Math.random().toString(36).slice(2, 8);
+export async function removeParticipantFromRoom(
+  externalRoomName: string,
+  participantIdentity: string
+): Promise<void> {
+  await roomService.removeParticipant(externalRoomName, participantIdentity);
+}
+
+/**
+ * Ferme complètement une salle LiveKit — déconnecte tous les participants
+ * immédiatement. Utilisé par le scheduler (meetingScheduler.ts) quand une
+ * séance atteint son heure de fin, et disponible pour un futur bouton
+ * "Terminer pour tout le monde" côté hôte.
+ */
+export async function endRoom(externalRoomName: string): Promise<void> {
+  await roomService.deleteRoom(externalRoomName);
+}
+
+export function getLivekitUrl(): string {
+  return LIVEKIT_URL;
 }
