@@ -1,4 +1,5 @@
 // Phase 1 — auth. Phase 2 (ce fichier) — modèle Meeting/Room séparé.
+// Phase intégration Amphix — IntegrationSession (idempotence external_session_id).
 
 datasource db {
   provider = "postgresql"
@@ -133,11 +134,14 @@ model Meeting {
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
 
-  room         Room?
-  participants MeetingParticipant[]
-  booking      Booking?
-  lobbyRequests LobbyRequest[]
-  whiteboard   Whiteboard?
+  room               Room?
+  participants       MeetingParticipant[]
+  booking            Booking?
+  lobbyRequests      LobbyRequest[]
+  whiteboard         Whiteboard?
+  /// Lien vers la séance d'intégration Amphix (si cette Meeting a été créée
+  /// via POST /api/v1/integrations/amphix/sessions) — null pour une réunion normale.
+  integrationSession IntegrationSession?
 
   @@index([hostId])
   @@map("meetings")
@@ -179,23 +183,23 @@ model MeetingParticipant {
 /// cours), et se lie à une Meeting seulement au moment où quelqu'un
 /// démarre effectivement la séance (bookingService.startBookingSession).
 model Booking {
-  id          String        @id @default(cuid())
-  studentId   String
-  student     User          @relation("StudentBookings", fields: [studentId], references: [id], onDelete: Cascade)
-  teacherId   String
-  teacher     User          @relation("TeacherBookings", fields: [teacherId], references: [id], onDelete: Cascade)
+  id              String        @id @default(cuid())
+  studentId       String
+  student         User          @relation("StudentBookings", fields: [studentId], references: [id], onDelete: Cascade)
+  teacherId       String
+  teacher         User          @relation("TeacherBookings", fields: [teacherId], references: [id], onDelete: Cascade)
   /// Qui a créé la demande — l'AUTRE partie doit confirmer avant que ça
   /// passe de PENDING à CONFIRMED.
-  createdById String
-  subject     String
-  startsAt    DateTime
-  endsAt      DateTime
+  createdById     String
+  subject         String
+  startsAt        DateTime
+  endsAt          DateTime
   durationMinutes Int
-  status      BookingStatus @default(PENDING)
-  meetingId   String?       @unique
-  meeting     Meeting?      @relation(fields: [meetingId], references: [id])
-  createdAt   DateTime      @default(now())
-  updatedAt   DateTime      @updatedAt
+  status          BookingStatus @default(PENDING)
+  meetingId       String?       @unique
+  meeting         Meeting?      @relation(fields: [meetingId], references: [id])
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
 
   @@index([studentId])
   @@index([teacherId])
@@ -236,6 +240,7 @@ model Whiteboard {
 
   @@map("whiteboards")
 }
+
 /// Lien entre une séance créée depuis Amphix (external_session_id, côté Amphix)
 /// et la Meeting Amphix Meet correspondante. Sert uniquement à l'idempotence :
 /// si Amphix réessaie le même appel (retry réseau), on renvoie la même
