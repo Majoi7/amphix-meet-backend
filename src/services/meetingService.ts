@@ -241,7 +241,7 @@ async function finalizeJoin(
  */
 export async function joinMeeting(input: JoinMeetingInput): Promise<JoinMeetingOutcome> {
   const [meeting, user] = await Promise.all([
-        prisma.meeting.findUnique({
+    prisma.meeting.findUnique({
       where: { joinCode: input.joinCode },
       include: { room: true, participants: true, integrationSession: true },
     }),
@@ -262,7 +262,7 @@ export async function joinMeeting(input: JoinMeetingInput): Promise<JoinMeetingO
   const existingParticipant = meeting.participants.find((p) => p.userId === input.userId);
 
   if (isHost || existingParticipant) {
-    const result = await finalizeJoin(meeting, input.userId, user.name, isHost);
+    const result = await finalizeJoin({ ...meeting, room: meeting.room }, input.userId, user.name, isHost);
     return { waiting: false, ...result };
   }
 
@@ -286,10 +286,9 @@ export async function joinMeeting(input: JoinMeetingInput): Promise<JoinMeetingO
     throw new ApiRequestError(403, "not_invited", "Tu n'es pas invité à cette réunion.");
   }
 
-  const result = await finalizeJoin(meeting, input.userId, user.name, false);
+  const result = await finalizeJoin({ ...meeting, room: meeting.room }, input.userId, user.name, false);
   return { waiting: false, ...result };
-}
-
+}   // ← accolade fermante manquante ajoutée ici
 /** Appelé en polling par le demandeur en salle d'attente. Génère le token
  * LiveKit à la volée dès que le statut passe à APPROVED (pas avant — on
  * ne crée pas de token pour une demande encore en attente). */
@@ -311,8 +310,8 @@ export async function getLobbyRequestStatus(
   if (!lobbyRequest.meeting.room) {
     throw new ApiRequestError(404, "meeting_not_found", "Cette réunion n'existe plus.");
   }
-  const result = await finalizeJoin(
-    lobbyRequest.meeting,
+    const result = await finalizeJoin(
+    { ...lobbyRequest.meeting, room: lobbyRequest.meeting.room },
     lobbyRequest.userId,
     lobbyRequest.user.name,
     false
