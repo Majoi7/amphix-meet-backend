@@ -236,3 +236,16 @@ model Whiteboard {
 
   @@map("whiteboards")
 }
+/// Lien entre une séance créée depuis Amphix (external_session_id, côté Amphix)
+/// et la Meeting Amphix Meet correspondante. Sert uniquement à l'idempotence :
+/// si Amphix réessaie le même appel (retry réseau), on renvoie la même
+/// réunion au lieu d'en créer une nouvelle.
+model IntegrationSession {
+  id                String   @id @default(cuid())
+  externalSessionId String   @unique
+  meetingId         String   @unique
+  meeting           Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  createdAt         DateTime @default(now())
+
+  @@map("integration_sessions")
+}

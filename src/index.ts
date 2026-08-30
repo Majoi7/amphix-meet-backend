@@ -9,6 +9,7 @@ import meetingsRouter from "./routes/meetings";
 import bookingsRouter from "./routes/bookings";
 import { errorHandler, notFoundHandler } from "./middleware/errorHandler";
 import { startMeetingScheduler } from "./jobs/meetingScheduler";
+import integrationsRouter from "./routes/integrations";
 
 const app = express();
 const PORT = Number(process.env.PORT ?? 4000);
@@ -32,6 +33,7 @@ app.get("/health", (_req, res) => {
 app.use("/api/v1/auth", authRouter);
 app.use("/api/v1/meetings", meetingsRouter);
 app.use("/api/v1/bookings", bookingsRouter);
+app.use("/api/v1/integrations", integrationsRouter);
 
 // ⚠️ Phase 2 : les anciennes routes V1 /api/rooms et /api/token (non
 // authentifiées) ont été RETIRÉES ici — remplacées par /api/v1/meetings,

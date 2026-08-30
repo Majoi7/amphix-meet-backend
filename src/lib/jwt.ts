@@ -34,3 +34,15 @@ export function signAccessToken(payload: AccessTokenPayload): string {
 export function verifyAccessToken(token: string): AccessTokenPayload {
   return jwt.verify(token, JWT_ACCESS_SECRET) as AccessTokenPayload;
 }
+/**
+ * Comme signAccessToken, mais avec une durée de vie explicite en secondes
+ * au lieu du TTL fixe de 15 min. Utilisé uniquement par l'intégration Amphix
+ * pour les "liens magiques" (join_url), dont le token doit rester valide
+ * jusqu'à la fin de la séance.
+ */
+export function signAccessTokenWithTtl(
+  payload: AccessTokenPayload,
+  ttlSeconds: number
+): string {
+  return jwt.sign(payload, JWT_ACCESS_SECRET, { expiresIn: ttlSeconds });
+}

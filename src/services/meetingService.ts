@@ -9,7 +9,7 @@ import {
   endRoom,
 } from "./livekitService";
 import { ApiRequestError } from "../middleware/errorHandler";
-
+import { sendWebhook } from "./webhookService";
 /// Durée de séance : 3h par défaut ET en plancher — cohérent avec le
 /// TTL minimum déjà imposé côté token LiveKit (MIN_SESSION_SECONDS dans
 /// livekitService.ts). Une valeur plus longue peut être demandée, jamais
@@ -195,6 +195,7 @@ async function finalizeJoin(
     joinCode: string;
     endsAt: Date | null;
     room: { id: string; externalRoomName: string; status: RoomStatus };
+    integrationSession?: { externalSessionId: string } | null;
   },
   userId: string,
   displayName: string,
@@ -213,6 +214,13 @@ async function finalizeJoin(
       where: { id: meeting.room.id },
       data: { status: RoomStatus.ACTIVE },
     });
+
+    if (meeting.integrationSession) {
+      void sendWebhook("meeting.started", {
+        external_session_id: meeting.integrationSession.externalSessionId,
+        meeting_id: meeting.id,
+      });
+    }
   }
 
   const token = await createParticipantToken({
@@ -224,7 +232,6 @@ async function finalizeJoin(
 
   return { token, livekitUrl: getLivekitUrl(), roomId: meeting.joinCode, role, endsAt: meeting.endsAt };
 }
-
 /**
  * Point d'entrée central des permissions : hôte et participants déjà
  * enregistrés rejoignent directement. Sinon, si requiresApproval est
@@ -234,9 +241,9 @@ async function finalizeJoin(
  */
 export async function joinMeeting(input: JoinMeetingInput): Promise<JoinMeetingOutcome> {
   const [meeting, user] = await Promise.all([
-    prisma.meeting.findUnique({
+        prisma.meeting.findUnique({
       where: { joinCode: input.joinCode },
-      include: { room: true, participants: true },
+      include: { room: true, participants: true, integrationSession: true },
     }),
     prisma.user.findUnique({ where: { id: input.userId } }),
   ]);
@@ -292,7 +299,7 @@ export async function getLobbyRequestStatus(
 ): Promise<{ status: "PENDING" } | { status: "REJECTED" } | ({ status: "APPROVED" } & FinalizedJoin)> {
   const lobbyRequest = await prisma.lobbyRequest.findUnique({
     where: { id: lobbyRequestId },
-    include: { meeting: { include: { room: true } }, user: true },
+    include: { meeting: { include: { room: true, integrationSession: true } }, user: true },
   });
 
   if (!lobbyRequest || lobbyRequest.userId !== requestingUserId) {
@@ -384,7 +391,7 @@ export async function respondToLobbyRequest(
 export async function autoEndExpiredMeetings(): Promise<number> {
   const expiredMeetings = await prisma.meeting.findMany({
     where: { status: MeetingStatus.IN_PROGRESS, endsAt: { lte: new Date() } },
-    include: { room: true },
+    include: { room: true, integrationSession: true },
   });
 
   for (const meeting of expiredMeetings) {
@@ -397,8 +404,6 @@ export async function autoEndExpiredMeetings(): Promise<number> {
           `[autoEndExpiredMeetings] Impossible de fermer la salle LiveKit ${meeting.room.externalRoomName}:`,
           err
         );
-        // On continue quand même à marquer la réunion terminée en base —
-        // mieux vaut un statut cohérent qu'une salle fantôme bloquante.
       }
     }
 
@@ -418,6 +423,13 @@ export async function autoEndExpiredMeetings(): Promise<number> {
       where: { meetingId: meeting.id, status: BookingStatus.IN_PROGRESS },
       data: { status: BookingStatus.COMPLETED },
     });
+
+    if (meeting.integrationSession) {
+      void sendWebhook("meeting.ended", {
+        external_session_id: meeting.integrationSession.externalSessionId,
+        meeting_id: meeting.id,
+      });
+    }
   }
 
   return expiredMeetings.length;
@@ -470,7 +482,10 @@ export async function removeParticipant(
 }
 
 export async function endMeeting(joinCode: string, requestingUserId: string): Promise<void> {
-  const meeting = await prisma.meeting.findUnique({ where: { joinCode } });
+  const meeting = await prisma.meeting.findUnique({
+    where: { joinCode },
+    include: { integrationSession: true },
+  });
 
   if (!meeting) {
     throw new ApiRequestError(404, "meeting_not_found", "Cette réunion n'existe pas.");
@@ -493,4 +508,11 @@ export async function endMeeting(joinCode: string, requestingUserId: string): Pr
       data: { status: BookingStatus.COMPLETED },
     }),
   ]);
+
+  if (meeting.integrationSession) {
+    void sendWebhook("meeting.ended", {
+      external_session_id: meeting.integrationSession.externalSessionId,
+      meeting_id: meeting.id,
+    });
+  }
 }
