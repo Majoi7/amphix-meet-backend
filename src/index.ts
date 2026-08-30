@@ -70,7 +70,6 @@ app.use(cookieParser());
 app.get("/health", (_req, res) => {
   res.status(200).json({ status: "ok", service: "amphix-meet" });
 });
-
 // Routes API
 app.use("/api/v1/auth", authRouter);
 app.use("/api/v1/meetings", meetingsRouter);

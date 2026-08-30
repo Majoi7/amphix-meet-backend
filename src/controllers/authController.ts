@@ -11,16 +11,19 @@ function setRefreshCookie(res: Response, token: string, expiresAt: Date): void {
   res.cookie(REFRESH_COOKIE_NAME, token, {
     httpOnly: true,
     secure: isProduction,
-    sameSite: "lax",
+    sameSite: "none",
     expires: expiresAt,
     path: "/api/v1/auth",
   });
 }
-
 function clearRefreshCookie(res: Response): void {
-  res.clearCookie(REFRESH_COOKIE_NAME, { path: "/api/v1/auth" });
+  res.clearCookie(REFRESH_COOKIE_NAME, {
+    httpOnly: true,
+    secure: true,
+    sameSite: "none",
+    path: "/api/v1/auth",
+  });
 }
-
 const registerSchema = z.object({
   email: z.string().email(),
   password: z.string().min(8, "Le mot de passe doit faire au moins 8 caractères."),
