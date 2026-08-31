@@ -73,10 +73,19 @@ export async function me(req: Request, res: Response): Promise<void> {
   const user = await authService.getUserById(req.user!.id);
   res.status(200).json({ user });
 }
-
 const updateMeSchema = z.object({
   name: z.string().min(1).max(100).optional(),
-  avatarUrl: z.string().url().optional(),
+  // z.string().url() rejette les data URLs base64 (l'avatar est stocké en
+  // base64 côté client faute d'infra de stockage fichiers) — on valide juste
+  // que c'est une image en data URL, ou une URL http(s) classique.
+  avatarUrl: z
+    .string()
+    .max(2_000_000, "Image trop lourde.")
+    .refine(
+      (val) => val.startsWith("data:image/") || /^https?:\/\//.test(val),
+      "Format d'image invalide."
+    )
+    .optional(),
 });
 
 export async function updateMe(req: Request, res: Response): Promise<void> {

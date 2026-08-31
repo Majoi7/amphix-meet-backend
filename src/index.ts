@@ -63,7 +63,7 @@ app.use(helmet());
 console.log("🛡️ Helmet activé");
 app.use(cors(corsOptions));
 console.log("🌍 CORS appliqué");
-app.use(express.json({ limit: "10kb" }));
+app.use(express.json({ limit: "5mb" }));
 app.use(cookieParser());
 
 // Route santé
