@@ -199,6 +199,7 @@ async function finalizeJoin(
   },
   userId: string,
   displayName: string,
+  avatarUrl: string | null | undefined,   // ← ajouté
   isHost: boolean
 ): Promise<FinalizedJoin> {
   const role = isHost ? ParticipantRole.HOST : ParticipantRole.PARTICIPANT;
@@ -227,6 +228,7 @@ async function finalizeJoin(
     roomName: meeting.room.externalRoomName,
     userId,
     displayName,
+    avatarUrl,          // ← ajouté
     isHost,
   });
 
@@ -258,11 +260,17 @@ export async function joinMeeting(input: JoinMeetingInput): Promise<JoinMeetingO
     throw new ApiRequestError(410, "meeting_ended", "Cette réunion est terminée.");
   }
 
-  const isHost = meeting.hostId === input.userId;
+    const isHost = meeting.hostId === input.userId;
   const existingParticipant = meeting.participants.find((p) => p.userId === input.userId);
 
   if (isHost || existingParticipant) {
-    const result = await finalizeJoin({ ...meeting, room: meeting.room }, input.userId, user.name, isHost);
+    const result = await finalizeJoin(
+      { ...meeting, room: meeting.room },
+      input.userId,
+      user.name,
+      user.avatarUrl,     // ← ajouté
+      isHost
+    );
     return { waiting: false, ...result };
   }
 
@@ -286,9 +294,16 @@ export async function joinMeeting(input: JoinMeetingInput): Promise<JoinMeetingO
     throw new ApiRequestError(403, "not_invited", "Tu n'es pas invité à cette réunion.");
   }
 
-  const result = await finalizeJoin({ ...meeting, room: meeting.room }, input.userId, user.name, false);
-  return { waiting: false, ...result };
-}   // ← accolade fermante manquante ajoutée ici
+    const result = await finalizeJoin(
+    { ...meeting, room: meeting.room },
+    input.userId,
+    user.name,
+    user.avatarUrl,       // ← ajouté
+    false
+  );
+  return { waiting: false, ...result }; }
+  
+  // ← accolade fermante manquante ajoutée ici
 /** Appelé en polling par le demandeur en salle d'attente. Génère le token
  * LiveKit à la volée dès que le statut passe à APPROVED (pas avant — on
  * ne crée pas de token pour une demande encore en attente). */
@@ -310,15 +325,15 @@ export async function getLobbyRequestStatus(
   if (!lobbyRequest.meeting.room) {
     throw new ApiRequestError(404, "meeting_not_found", "Cette réunion n'existe plus.");
   }
-    const result = await finalizeJoin(
+     const result = await finalizeJoin(
     { ...lobbyRequest.meeting, room: lobbyRequest.meeting.room },
     lobbyRequest.userId,
     lobbyRequest.user.name,
+    lobbyRequest.user.avatarUrl,   // ← ajouté
     false
   );
-  return { status: "APPROVED", ...result };
+ return { status: "APPROVED", ...result };
 }
-
 export interface LobbyRequestItem {
   id: string;
   userId: string;
@@ -479,11 +494,10 @@ export async function removeParticipant(
     data: { leftAt: new Date() },
   });
 }
-
 export async function endMeeting(joinCode: string, requestingUserId: string): Promise<void> {
   const meeting = await prisma.meeting.findUnique({
     where: { joinCode },
-    include: { integrationSession: true },
+    include: { room: true, integrationSession: true },
   });
 
   if (!meeting) {
@@ -491,6 +505,24 @@ export async function endMeeting(joinCode: string, requestingUserId: string): Pr
   }
   if (meeting.hostId !== requestingUserId) {
     throw new ApiRequestError(403, "forbidden", "Seul l'hôte peut terminer la réunion.");
+  }
+  if (meeting.status === MeetingStatus.COMPLETED || meeting.status === MeetingStatus.CANCELLED) {
+    throw new ApiRequestError(410, "meeting_already_ended", "Cette réunion est déjà terminée.");
+  }
+
+  // Coupe réellement tout le monde côté LiveKit — best-effort, on ne bloque
+  // pas la mise à jour DB si LiveKit répond en erreur (même logique que
+  // autoEndExpiredMeetings).
+  if (meeting.room) {
+    try {
+      await endRoom(meeting.room.externalRoomName);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(
+        `[endMeeting] Impossible de fermer la salle LiveKit ${meeting.room.externalRoomName}:`,
+        err
+      );
+    }
   }
 
   await prisma.$transaction([

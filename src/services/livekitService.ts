@@ -30,6 +30,7 @@ interface CreateTokenInput {
   roomName: string; // externalRoomName (Room.externalRoomName)
   userId: string; // identité stable — permet de retrouver/retirer un participant précis
   displayName: string;
+  avatarUrl?: string | null;   // ← ajouté
   isHost: boolean;
 }
 
@@ -48,6 +49,7 @@ export async function createParticipantToken(input: CreateTokenInput): Promise<s
     identity: input.userId,
     name: input.displayName,
     ttl: TOKEN_TTL_SECONDS,
+    metadata: JSON.stringify({ avatarUrl: input.avatarUrl ?? undefined }),
   });
 
   at.addGrant({
