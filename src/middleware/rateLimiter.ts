@@ -17,3 +17,19 @@ export const apiRateLimiter = rateLimit({
     message: "Trop de requêtes. Réessaie dans un instant.",
   },
 });
+
+/**
+ * Limiteur moins restrictif pour les endpoints d'authentification publics
+ * (inscription, connexion, etc.) afin d'éviter de bloquer les utilisateurs légitimes
+ * provenant du même IP (ex: même réseau scolaire).
+ */
+export const authRateLimiter = rateLimit({
+  windowMs: WINDOW_MS,
+  max: Number(process.env.RATE_LIMIT_AUTH_MAX ?? 100), // 100 requêtes par minute par défaut
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error: "rate_limited",
+    message: "Trop de requêtes. Réessaie dans un instant.",
+  },
+});

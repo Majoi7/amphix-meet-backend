@@ -52,7 +52,7 @@ const corsOptions: cors.CorsOptions = {
       callback(new Error(`Origin ${origin} not allowed by CORS`));
     }
   },
-  methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "X-Amphix-Secret"],
   credentials: true,
   optionsSuccessStatus: 204,
