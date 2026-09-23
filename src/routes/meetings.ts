@@ -43,4 +43,15 @@ router.post(
   asyncHandler(meetingController.removeParticipant)
 );
 
+router.post(
+  "/:joinCode/global-pin",
+  apiRateLimiter,
+  asyncHandler(meetingController.setGlobalPin)
+);
+
+router.delete(
+  "/:joinCode/global-pin",
+  asyncHandler(meetingController.clearGlobalPin)
+);
+
 export default router;

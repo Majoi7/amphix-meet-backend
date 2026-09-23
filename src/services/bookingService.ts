@@ -5,6 +5,19 @@ import { createMeeting } from "./meetingService";
 
 const DEFAULT_DURATION_MINUTES = 180; // cohérent avec la règle "séances de 3h"
 
+/**
+ * Le message UNIQUE des échecs « cette adresse ne mène pas à une réservation
+ * possible ». Il couvre deux causes — adresse sans compte, ou compte du même
+ * rôle que le demandeur — sans dire laquelle, pour que la réponse ne serve
+ * pas à vérifier si une adresse est inscrite (voir `createBooking`).
+ *
+ * Il énonce les deux règles plutôt que de les taire : c'est ce qui le rend
+ * encore utile à quelqu'un qui s'est simplement trompé d'adresse ou de
+ * destinataire.
+ */
+const RECIPIENT_UNAVAILABLE =
+  "Impossible de réserver avec cette adresse email : une réservation se fait entre un élève et un enseignant, et la personne doit avoir un compte Amphix Meet.";
+
 export interface CreateBookingInput {
   creatorId: string;
   otherPartyEmail: string;
@@ -74,22 +87,46 @@ export async function createBooking(input: CreateBookingInput): Promise<BookingS
   if (!creator) {
     throw new ApiRequestError(401, "unauthorized", "Utilisateur introuvable.");
   }
-  if (!otherParty) {
-    throw new ApiRequestError(
-      404,
-      "user_not_found",
-      "Aucun compte trouvé avec cet email. La personne doit d'abord créer un compte Amphix Meet."
-    );
-  }
-  if (otherParty.id === creator.id) {
-    throw new ApiRequestError(400, "invalid_target", "Tu ne peux pas te réserver toi-même.");
-  }
-  if (creator.role === otherParty.role || creator.role === UserRole.ADMIN) {
+
+  // ── Ne pas faire de cette fonction un annuaire ────────────────────────
+  //
+  // Cet endpoint cherche un compte par adresse email. Tel quel, il
+  // permettrait donc à n'importe quel utilisateur connecté de tester si une
+  // adresse donnée est inscrite : deux réponses distinctes — « aucun compte
+  // avec cet email » (404) et « la réservation doit se faire entre un élève
+  // et un enseignant » (400) — se comparent, et disent laquelle est vraie.
+  //
+  // Le remède complet — répondre la même chose dans tous les cas — n'est pas
+  // disponible ici : une réservation RÉUSSIE prouve forcément que le compte
+  // existe, puisque c'est la fonction même de la réservation. Le retirer
+  // demanderait un parcours d'invitation par email (on écrit à l'adresse,
+  // elle répond ou non), qui n'existe pas et sortirait du périmètre.
+  //
+  // Ce qui est retiré, c'est la réponse qui ne crée RIEN. Les deux échecs
+  // « cette adresse ne mène pas à une réservation possible » sont réunis en
+  // une seule réponse — même statut, même code, même texte — qui ne dit pas
+  // laquelle des deux causes s'applique. Le texte reste utile dans les deux
+  // cas : il énonce la règle de rôle ET l'exigence de compte, donc un
+  // enseignant qui saisit l'adresse d'un collègue comprend son erreur, et
+  // quelqu'un qui se trompe d'adresse sait quoi vérifier. Ce qui disparaît,
+  // c'est la CONFIRMATION.
+  //
+  // Les deux refus qui restent distincts ne disent rien de l'adresse
+  // saisie : celui de l'administrateur ne dépend que de son propre rôle, et
+  // celui de l'auto-réservation que de sa propre adresse — vérifiés avant
+  // ou en dehors de toute conclusion sur l'existence d'un tiers.
+  if (creator.role === UserRole.ADMIN) {
     throw new ApiRequestError(
       400,
       "invalid_roles",
-      "Une réservation doit se faire entre un élève et un enseignant."
+      "Les réservations se font entre un élève et un enseignant."
     );
+  }
+  if (otherParty && otherParty.id === creator.id) {
+    throw new ApiRequestError(400, "invalid_target", "Tu ne peux pas te réserver toi-même.");
+  }
+  if (!otherParty || otherParty.role === creator.role) {
+    throw new ApiRequestError(404, "recipient_unavailable", RECIPIENT_UNAVAILABLE);
   }
 
   const isCreatorStudent = creator.role === UserRole.STUDENT;

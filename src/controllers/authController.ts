@@ -5,25 +5,54 @@ import * as authService from "../services/authService";
 import { ApiRequestError } from "../middleware/errorHandler";
 
 const REFRESH_COOKIE_NAME = "amphix_refresh_token";
+const REFRESH_COOKIE_PATH = "/api/v1/auth";
 const isProduction = process.env.NODE_ENV === "production";
+
+/**
+ * Les attributs du cookie de refresh, définis UNE fois.
+ *
+ * POSER ET SUPPRIMER DOIVENT PARLER DU MÊME COOKIE.
+ *
+ * Un navigateur ne remplace ou n'efface un cookie que si le `Set-Cookie`
+ * reçu désigne le MÊME couple (nom, domaine, chemin) — et il n'applique
+ * la suppression que si l'en-tête est lui-même accepté. Écrire les deux
+ * listes d'attributs séparément les laissait diverger : la suppression
+ * annonçait `sameSite: "none"` quel que soit l'environnement, alors que la
+ * pose émet `lax` hors production. Or un navigateur REJETTE un
+ * `SameSite=None` qui n'est pas aussi `Secure` — ce qui est exactement le
+ * cas en développement, où `secure` vaut `false`. L'en-tête d'effacement
+ * était donc écarté, et le cookie de refresh survivait à la déconnexion :
+ * l'utilisateur se croyait déconnecté, mais un rechargement de page
+ * rouvrait sa session à partir du cookie resté en place.
+ *
+ * Une seule source pour ces quatre attributs, donc. `httpOnly`, `secure`,
+ * `sameSite` et `path` sont IDENTIQUES à la pose et à la suppression ;
+ * seul `expires`, qui dit *quand*, appartient à l'appelant — dans le futur
+ * pour poser, dans le passé pour supprimer.
+ */
+const refreshCookieAttributes = {
+  httpOnly: true,
+  secure: isProduction,
+  sameSite: isProduction ? ("none" as const) : ("lax" as const),
+  path: REFRESH_COOKIE_PATH,
+};
 
 function setRefreshCookie(res: Response, token: string, expiresAt: Date): void {
   res.cookie(REFRESH_COOKIE_NAME, token, {
-    httpOnly: true,
-    secure: isProduction,
-    sameSite: "none",
+    ...refreshCookieAttributes,
     expires: expiresAt,
-    path: "/api/v1/auth",
   });
 }
+
+/**
+ * `res.clearCookie` pose lui-même une date d'expiration dans le passé
+ * (`new Date(1)`) : c'est cette date qui supprime, et la répéter ici ne
+ * ferait que dupliquer une valeur que l'API choisit déjà.
+ */
 function clearRefreshCookie(res: Response): void {
-  res.clearCookie(REFRESH_COOKIE_NAME, {
-    httpOnly: true,
-    secure: true,
-    sameSite: "none",
-    path: "/api/v1/auth",
-  });
+  res.clearCookie(REFRESH_COOKIE_NAME, refreshCookieAttributes);
 }
+
 const registerSchema = z.object({
   email: z.string().email(),
   password: z.string().min(8, "Le mot de passe doit faire au moins 8 caractères."),

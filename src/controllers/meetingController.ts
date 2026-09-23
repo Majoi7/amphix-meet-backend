@@ -109,3 +109,22 @@ export async function removeParticipant(req: Request, res: Response): Promise<vo
   await meetingService.removeParticipant(joinCode, req.user!.id, userId);
   res.status(200).json({ message: "Participant retiré." });
 }
+
+/** Set global pin for a participant or screen share */
+export async function setGlobalPin(req: Request, res: Response): Promise<void> {
+  const { joinCode } = joinCodeParamSchema.parse(req.params);
+  const { participantId, trackSource } = z.object({
+    participantId: z.string().min(1),
+    trackSource: z.enum(["Camera", "ScreenShare"])
+  }).parse(req.body);
+
+  await meetingService.setGlobalPin(joinCode, req.user!.id, participantId, trackSource);
+  res.status(200).json({ message: "Épingle globale définie." });
+}
+
+/** Clear global pin */
+export async function clearGlobalPin(req: Request, res: Response): Promise<void> {
+  const { joinCode } = joinCodeParamSchema.parse(req.params);
+  await meetingService.clearGlobalPin(joinCode, req.user!.id);
+  res.status(200).json({ message: "Épingle globale supprimée." });
+}

@@ -1,4 +1,4 @@
-import { AccessToken, RoomServiceClient, TrackType } from "livekit-server-sdk";
+import { AccessToken, RoomServiceClient, TrackType, DataPacket_Kind } from "livekit-server-sdk";
 
 const LIVEKIT_URL = process.env.LIVEKIT_URL ?? "";
 const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY ?? "";
@@ -113,4 +113,22 @@ export async function endRoom(externalRoomName: string): Promise<void> {
 
 export function getLivekitUrl(): string {
   return LIVEKIT_URL;
+}
+
+/**
+ * Publie les données d'épingle globale sur le data channel "global-pin"
+ * de la salle spécifiée.
+ */
+export async function publishGlobalPinData(
+  externalRoomName: string,
+  participantId: string | null,
+  trackSource: "Camera" | "ScreenShare" | null
+): Promise<void> {
+  const data = new TextEncoder().encode(JSON.stringify({ participantId, trackSource }));
+  await roomService.sendData(
+    externalRoomName,
+    data,
+    DataPacket_Kind.RELIABLE,
+    { topic: "global-pin" }
+  );
 }

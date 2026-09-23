@@ -144,72 +144,19 @@ export interface MeetingSummary {
   isHost: boolean;
   hostName: string;
   endsAt: Date | null;
-  /** Épingle globale courante — permet au frontend de la restaurer après un
-   *  rechargement de page (le data channel LiveKit ne rejoue pas les messages
-   *  déjà diffusés). Null si aucune épingle n'est posée. */
-  globalPinnedParticipantId: string | null;
-  globalPinnedTrackSource: string | null;
 }
 
-/**
- * La fiche d'une réunion, vue par quelqu'un qui en connaît le code.
- *
- * CETTE ROUTE N'EST PAS QU'UNE LECTURE.
- *
- * Elle exige une session, mais pas d'invitation : le code de réunion EST le
- * laissez-passer, et c'est voulu — c'est ce qui permet de partager un lien.
- * Elle répond donc à toute personne connectée qui présente un code, y
- * compris pour une réunion que `joinMeeting` refusera ensuite. Un code ne
- * garde bien que s'il est difficile à deviner ; il ne dit rien de qui a le
- * DROIT d'entrer.
- *
- * La seule chose qui était ouverte sans l'être nulle part ailleurs : une
- * réunion FERMÉE — ni invités (`allowGuest: false`) ni salle d'attente pour
- * rattraper (`requiresApproval: true`), c'est-à-dire une réunion dont le
- * `joinMeeting` ne laissera jamais entrer un inconnu, dans aucun cas de
- * figure. La fiche en disait quand même le titre, le nom de l'hôte et
- * l'état, à quiconque présentait un code — assez pour cartographier les
- * réunions d'un établissement à partir de codes devinés, alors même que la
- * porte est verrouillée.
- *
- * ELLE RESTE OUVERTE PARTOUT AILLEURS, ET C'EST DÉLIBÉRÉ. Dès que la
- * réunion accepte les invités, ou qu'une salle d'attente permet à l'hôte
- * d'accepter quelqu'un, la fiche est légitimement ce que voit la personne
- * qui s'apprête à demander l'entrée : elle a besoin du titre et du nom de
- * l'hôte pour savoir si elle frappe à la bonne porte. Le code n'est pas
- * transformé en secret d'authentification, et le lien partagé continue de
- * fonctionner exactement comme avant.
- *
- * « Participant autorisé » se lit ICI comme dans `joinMeeting` et dans
- * `whiteboardService` : une ligne `MeetingParticipant`, y compris pour un
- * participant pré-enregistré — c'est ainsi que l'élève d'une réservation
- * reçoit son accès avant même d'avoir ouvert la salle, et c'est aussi ce
- * qui laisse un participant déjà venu rentrer sans repasser par la salle
- * d'attente. Les trois doivent s'accorder, sinon un élève serait reçu par
- * l'un et refusé par l'autre.
- */
 export async function getMeetingByJoinCode(
   joinCode: string,
   requestingUserId: string
 ): Promise<MeetingSummary> {
   const meeting = await prisma.meeting.findUnique({
     where: { joinCode },
-    include: { host: true, participants: true },
+    include: { host: true },
   });
 
   if (!meeting) {
     throw new ApiRequestError(404, "meeting_not_found", "Cette réunion n'existe pas.");
-  }
-
-  const isHost = meeting.hostId === requestingUserId;
-  const isParticipant = meeting.participants.some((p) => p.userId === requestingUserId);
-  const isClosed = !meeting.allowGuest && meeting.requiresApproval;
-
-  if (isClosed && !isHost && !isParticipant) {
-    // Même statut et même code que le refus de `joinMeeting` : la personne
-    // qui suit un lien vers une réunion fermée reçoit le même message, que
-    // ce soit à l'affichage de la fiche ou à la tentative d'entrée.
-    throw new ApiRequestError(403, "not_invited", "Tu n'es pas invité à cette réunion.");
   }
 
   return {
@@ -217,11 +164,9 @@ export async function getMeetingByJoinCode(
     joinCode: meeting.joinCode,
     title: meeting.title,
     status: meeting.status,
-    isHost,
+    isHost: meeting.hostId === requestingUserId,
     hostName: meeting.host.name,
     endsAt: meeting.endsAt,
-    globalPinnedParticipantId: meeting.globalPinnedParticipantId,
-    globalPinnedTrackSource: meeting.globalPinnedTrackSource,
   };
 }
 
@@ -316,7 +261,7 @@ export async function joinMeeting(input: JoinMeetingInput): Promise<JoinMeetingO
     throw new ApiRequestError(410, "meeting_ended", "Cette réunion est terminée.");
   }
 
-  const isHost = meeting.hostId === input.userId;
+    const isHost = meeting.hostId === input.userId;
   const existingParticipant = meeting.participants.find((p) => p.userId === input.userId);
 
   if (isHost || existingParticipant) {
@@ -346,19 +291,18 @@ export async function joinMeeting(input: JoinMeetingInput): Promise<JoinMeetingO
     return { waiting: true, lobbyRequestId: lobbyRequest.id };
   }
 
-  else if (!meeting.allowGuest) {
+  if (!meeting.allowGuest) {
     throw new ApiRequestError(403, "not_invited", "Tu n'es pas invité à cette réunion.");
-  } else {
-    const result = await finalizeJoin(
-      { ...meeting, room: meeting.room },
-      input.userId,
-      user.name,
-      user.avatarUrl,       // ← ajouté
-      false
-    );
-    return { waiting: false, ...result };
   }
-}
+
+    const result = await finalizeJoin(
+    { ...meeting, room: meeting.room },
+    input.userId,
+    user.name,
+    user.avatarUrl,       // ← ajouté
+    false
+  );
+  return { waiting: false, ...result }; }
 
   // ← accolade fermante manquante ajoutée ici
 /** Appelé en polling par le demandeur en salle d'attente. Génère le token
@@ -381,15 +325,14 @@ export async function getLobbyRequestStatus(
   if (!lobbyRequest.meeting.room) {
     throw new ApiRequestError(404, "meeting_not_found", "Cette réunion n'existe plus.");
   }
-
-  const result = await finalizeJoin(
+     const result = await finalizeJoin(
     { ...lobbyRequest.meeting, room: lobbyRequest.meeting.room },
     lobbyRequest.userId,
     lobbyRequest.user.name,
     lobbyRequest.user.avatarUrl,   // ← ajouté
     false
   );
-  return { status: "APPROVED", ...result };
+ return { status: "APPROVED", ...result };
 }
 export interface LobbyRequestItem {
   id: string;
@@ -688,4 +631,3 @@ export async function clearGlobalPin(
     );
   }
 }
-
